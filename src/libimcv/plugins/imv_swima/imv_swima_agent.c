@@ -52,7 +52,9 @@ static pen_type_t msg_types[] = {
  */
 enum imv_swima_attr_t {
 	IMV_SWIMA_ATTR_SW_INV =    (1<<0),
-	IMV_SWIMA_ATTR_SW_ID_INV = (1<<1)
+	IMV_SWIMA_ATTR_SW_ID_INV = (1<<1),
+	IMV_SWIMA_ATTR_SW_EV =     (1<<2),
+	IMV_SWIMA_ATTR_SW_ID_EV =  (1<<2)
 };
 
 /**
@@ -308,7 +310,7 @@ static TNC_Result receive_msg(private_imv_swima_agent_t *this,
 				uint32_t missing;
 				int sw_ev_count;
 
-				state->set_action_flags(state, IMV_SWIMA_ATTR_SW_ID_INV);
+				state->set_action_flags(state, IMV_SWIMA_ATTR_SW_ID_EV);
 
 				attr_cast = (ietf_swima_attr_sw_ev_t*)attr;
 				request_id = attr_cast->get_request_id(attr_cast);
@@ -550,38 +552,51 @@ METHOD(imv_agent_if_t, batch_ending, TNC_Result,
 	received = state->get_action_flags(state);
 
 	if (handshake_state == IMV_SWIMA_STATE_WORKITEMS &&
-	   (received & (IMV_SWIMA_ATTR_SW_INV|IMV_SWIMA_ATTR_SW_ID_INV)) &&
+	   (received & (IMV_SWIMA_ATTR_SW_INV|IMV_SWIMA_ATTR_SW_ID_INV|
+					IMV_SWIMA_ATTR_SW_EV |IMV_SWIMA_ATTR_SW_ID_EV)) &&
 		swima_state->get_missing(swima_state) == 0)
 	{
 		TNC_IMV_Evaluation_Result eval;
 		TNC_IMV_Action_Recommendation rec;
-		char result_str[BUF_LEN], *error_str = "", *command;
+		char result_str[BUF_LEN], *error_str = "", *cmd = NULL, *command;
 		char *target_str;
-		int tag_id_count, tag_count, i;
+		int sw_id_count, tag_count, i, res;
 		json_object *jrequest, *jresponse, *jvalue;
 		ietf_swima_attr_req_t *cast_attr;
 		swima_inventory_t *targets;
 		swima_record_t *target;
 		status_t status = SUCCESS;
 
-		if (this->rest_api && (received & IMV_SWIMA_ATTR_SW_ID_INV))
+		if (this->rest_api)
 		{
-			if (asprintf(&command, "sessions/%d/swid-measurement/",
-						 session->get_session_id(session, NULL, NULL)) < 0)
+			if (received & IMV_SWIMA_ATTR_SW_ID_INV)
 			{
-				error_str = "allocation of command string failed";
-				status = FAILED;
+				cmd = "swid-measurement";
 			}
-			else
+			else if (received & IMV_SWIMA_ATTR_SW_ID_EV)
 			{
-				jrequest = swima_state->get_inventory(swima_state);
-				status = this->rest_api->post(this->rest_api, command,
-											  jrequest, &jresponse);
-				if (status == FAILED)
+				cmd = "swid-events";
+			}
+			if (cmd)
+			{
+				res = asprintf(&command, "sessions/%d/%s/",
+						 session->get_session_id(session, NULL, NULL), cmd);
+				if (res < 0)
 				{
-					error_str = "error in REST API swid-measurement request";
+					error_str = "allocation of command string failed";
+					status = FAILED;
 				}
-				free(command);
+				else
+				{
+					jrequest = swima_state->get_jrequest(swima_state);
+					status = this->rest_api->post(this->rest_api, command,
+												  jrequest, &jresponse);
+					if (status == FAILED)
+					{
+						error_str = "error in REST API request";
+					}
+					free(command);
+				}
 			}
 		}
 
@@ -593,12 +608,12 @@ METHOD(imv_agent_if_t, batch_ending, TNC_Result,
 				{
 					if (workitem->get_type(workitem) == IMV_WORKITEM_SWID_TAGS)
 					{
-						swima_state->get_count(swima_state, &tag_id_count,
+						swima_state->get_count(swima_state, &sw_id_count,
 														  &tag_count);
 						snprintf(result_str, BUF_LEN, "received inventory of "
-								 "%d SWID tag ID%s and %d SWID tag%s",
-								 tag_id_count, (tag_id_count == 1) ? "" : "s",
-								 tag_count, (tag_count == 1) ? "" : "s");
+								 "%d SW ID%s and %d SWID tag%s",
+								 sw_id_count, (sw_id_count == 1) ? "" : "s",
+								 tag_count,   (tag_count == 1)   ? "" : "s");
 						session->remove_workitem(session, enumerator);
 
 						eval = TNC_IMV_EVALUATION_RESULT_COMPLIANT;
@@ -630,13 +645,13 @@ METHOD(imv_agent_if_t, batch_ending, TNC_Result,
 				/* Create an IETF SW Request attribute */
 				attr = ietf_swima_attr_req_create(IETF_SWIMA_ATTR_REQ_FLAG_NONE,
 								swima_state->get_request_id(swima_state));
-				tag_id_count = json_object_array_length(jresponse);
-				DBG1(DBG_IMV, "%d SWID tag target%s", tag_id_count,
-							  (tag_id_count == 1) ? "" : "s");
-				swima_state->set_missing(swima_state, tag_id_count);
+				sw_id_count = json_object_array_length(jresponse);
+				DBG1(DBG_IMV, "%d SWID tag target%s", sw_id_count,
+							  (sw_id_count == 1) ? "" : "s");
+				swima_state->set_missing(swima_state, sw_id_count);
 				targets = swima_inventory_create();
 
-				for (i = 0; i < tag_id_count; i++)
+				for (i = 0; i < sw_id_count; i++)
 				{
 					jvalue = json_object_array_get_idx(jresponse, i);
 					if (json_object_get_type(jvalue) != json_type_string)
